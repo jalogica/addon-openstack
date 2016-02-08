@@ -1,0 +1,120 @@
+---
+- hosts: all
+  remote_user: vagrant
+  become: yes
+  vars:
+    - firewall_allowed_tcp_ports: "9123"
+  tasks:
+    - service: name=NetworkManager state=stopped enabled=no
+    - service: name=network state=started enabled=yes
+    - yum: name=epel-release state=present
+    - yum: name="{{item}}" state=present
+      with_items:
+        - "gcc*"
+        - xmlrpc-c-devel
+        - scons
+        - sqlite-devel
+        - log4cpp-devel
+        - libxml2-devel
+        - openssl-devel
+        - ruby-devel
+        - expat-devel
+        - git
+        - libxml2-devel
+        - nodejs
+        - npm
+        - tree
+        - net-tools
+    - gem: name="{{item}}" state=present user_install=no
+      with_items:
+        - nokogiri
+        - rake
+        - xmlparser
+        - curb
+        - json
+        - sequel
+        - net-ldap
+        - amazon-ec2
+        - sinatra
+        - thin
+        - uuidtools
+        - builder
+        - zendesk_api
+        - openstack
+    - npm: name="{{item}}" global=yes
+      with_items:
+        - bower
+        - grunt
+        - grunt-cli
+
+    - git: >
+        repo="https://github.com/OpenNebula/one.git"
+        dest="/opt/one"
+        version="release-4.14.2"
+
+    - group: name=oneadmin state=present
+    - name: Create oneadmin user
+      user: name=oneadmin comment="OpenNebula admin" group=oneadmin
+    - file: name=/home/oneadmin/.one owner=oneadmin group=oneadmin mode=0755 state=directory
+    - copy: content="oneadmin:oneadmin" dest=/home/oneadmin/.one/one_auth owner=oneadmin group=oneadmin mode=0600
+
+    - command: "{{item}}"
+      args:
+        chdir: /opt/one
+      with_items:
+        - "/usr/bin/scons -j2 mysql=no sqlite=yes syslog=yes sunstone=no"
+        - "/usr/bin/bash ./install.sh -u oneadmin -g oneadmin"
+
+    # http://docs.opennebula.org/4.14/integration/references/sunstone_dev.html
+    - command: "{{item}}"
+      args:
+        chdir: /usr/lib/one/sunstone/public
+      with_items:
+        - "npm install"
+        - "bower install --allow-root"
+        - "grunt -v sass"
+        - "grunt -v requirejs"
+
+    - lineinfile: "dest=/etc/one/sunstone-server.conf regexp='^:host: 127.0.0.1' line=':host: 0.0.0.0'"
+    - lineinfile: "dest=/etc/one/sunstone-server.conf regexp='^:env: \'prod\'' line=':env: \'dev\''"
+    - blockinfile:
+        dest: /etc/one/oned.conf
+        block: |
+          IM_MAD = [
+            name       = "openstack",
+            executable = "one_im_sh",
+            arguments  = "-t 1 -r 0 openstack" ]
+          VM_MAD = [
+            name       = "openstack",
+            executable = "one_vmm_sh",
+            arguments  = "-t 15 -r 0 openstack",
+            type       = "xml" ]
+
+    - file: path="{{item}}" state=directory owner=oneadmin group=oneadmin mode=0755
+      with_items:
+        - /var/lib/one/remotes/vmm/openstack
+        - /var/lib/one/remotes/im/openstack.d
+    - file: src="/vagrant/addon/{{ item.src }}" dest="{{ item.dest }}" state=link
+      with_items:
+        - { src: 'openstack_driver.rb', dest: '/usr/lib/one/ruby/openstack_driver.rb' }
+        - { src: 'openstack_driver.rb', dest: '/var/lib/one/remotes/vmm/openstack/openstack_driver.rb' }
+        - { src: 'deploy',              dest: '/var/lib/one/remotes/vmm/openstack/deploy' }
+        - { src: 'poll',                dest: '/var/lib/one/remotes/im/openstack.d/poll' }
+      notify: restart oned
+
+    - command: "{{item}}"
+      become_user: oneadmin
+      with_items:
+        - /usr/bin/one restart
+        - /usr/bin/sunstone-server stop
+        - /usr/bin/sunstone-server start
+      ignore_errors: yes
+
+    - name: Create OpenStack Host on OpenNebula # --cluster openstack-cluster
+      command: /bin/onehost create openstack-host --im openstack --vm openstack --net dummy
+      become_user: oneadmin
+      ignore_errors: yes
+
+    - name: Upload OpenStack driver configuration
+      template: src=os_driver.conf.j2 dest=/etc/one/os_driver.conf owner=root group=root mode=0644
+      notify: restart oned

@@ -1,0 +1,3 @@
+- name: restart oned
+  command: /usr/bin/one restart
+  become_user: oneadmin
